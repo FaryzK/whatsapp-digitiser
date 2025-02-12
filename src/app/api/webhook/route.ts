@@ -109,17 +109,18 @@ function splitIntoWhatsAppMessages(text: string, maxLength: number = 1500): stri
 
 export async function POST(request: Request) {
   try {
-    console.log('Received webhook request'); // Add logging
+    console.log('🔵 Received webhook request');
 
     const formData = await request.formData();
     const from = formData.get('From') as string;
     const body = formData.get('Body') as string;
     
-    console.log('Message from:', from); // Add logging
-    console.log('Message body:', body); // Add logging
+    console.log('📱 Message from:', from);
+    console.log('📝 Message body:', body);
 
     // If there's no media, just respond to the text message
     if (!formData.get('MediaUrl0')) {
+      console.log('❌ No media received');
       return sendWhatsAppMessage(
         from,
         'Hello! Please send an image to digitize its content.'
@@ -138,81 +139,107 @@ export async function POST(request: Request) {
 
     // Get the image content and handle the format
     const mediaUrl = formData.get('MediaUrl0') as string;
-    console.log('Media URL:', mediaUrl);
+    console.log('🖼️ Media URL:', mediaUrl);
 
-    // Create Twilio client for media handling
-    const client = twilio(
-      process.env.TWILIO_ACCOUNT_SID,
-      process.env.TWILIO_AUTH_TOKEN
-    );
+    try {
+      // Create Twilio client for media handling
+      const client = twilio(
+        process.env.TWILIO_ACCOUNT_SID,
+        process.env.TWILIO_AUTH_TOKEN
+      );
 
-    // Extract the Media SID from the URL
-    const mediaSid = mediaUrl.split('/Media/')[1];
-    console.log('Media SID:', mediaSid);
+      // Extract the Media SID from the URL
+      const mediaSid = mediaUrl.split('/Media/')[1];
+      console.log('🆔 Media SID:', mediaSid);
 
-    // Get the media resource
-    const media = await client.messages(formData.get('MessageSid') as string)
-      .media(mediaSid)
-      .fetch();
-    
-    // Get the actual content URL
-    const contentUrl = media.uri.replace('.json', '');
-    console.log('Content URL:', contentUrl);
+      // Get the media resource
+      const media = await client.messages(formData.get('MessageSid') as string)
+        .media(mediaSid)
+        .fetch();
+      
+      // Get the actual content URL
+      const contentUrl = media.uri.replace('.json', '');
+      console.log('🔗 Content URL:', contentUrl);
 
-    // Fetch the actual image
-    const imageResponse = await fetch(`https://api.twilio.com${contentUrl}`, {
-      headers: {
-        Authorization: `Basic ${Buffer.from(
-          `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-        ).toString('base64')}`,
-      },
-    });
+      // Fetch the actual image
+      const imageResponse = await fetch(`https://api.twilio.com${contentUrl}`, {
+        headers: {
+          Authorization: `Basic ${Buffer.from(
+            `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+          ).toString('base64')}`,
+        },
+      });
 
-    const contentType = imageResponse.headers.get('content-type');
-    console.log('Content Type:', contentType);
+      const contentType = imageResponse.headers.get('content-type');
+      console.log('📋 Content Type:', contentType);
 
-    // Ensure we have a valid image type
-    if (!contentType || !contentType.startsWith('image/')) {
+      if (!contentType || !contentType.startsWith('image/')) {
+        console.log('❌ Invalid content type:', contentType);
+        return sendWhatsAppMessage(
+          from,
+          'Please send a valid image file (JPEG, PNG, GIF, or WEBP).'
+        );
+      }
+
+      const imageBuffer = await imageResponse.arrayBuffer();
+      console.log('📊 Image size:', {
+        bytes: imageBuffer.byteLength,
+        megabytes: (imageBuffer.byteLength / (1024 * 1024)).toFixed(2) + 'MB'
+      });
+
+      // Add size check
+      if (imageBuffer.byteLength > 20 * 1024 * 1024) { // 20MB limit
+        console.log('❌ Image too large');
+        return sendWhatsAppMessage(
+          from,
+          'The image is too large. Please send an image smaller than 20MB.'
+        );
+      }
+
+      const imageBase64 = Buffer.from(imageBuffer).toString('base64');
+
+      // Process image with OpenAI Vision
+      console.log('🤖 Sending to OpenAI...');
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Please extract and structure all the text content from this image..." },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${contentType};base64,${imageBase64}`,
+                },
+              },
+            ],
+          },
+        ],
+        max_tokens: 500,
+      });
+
+      console.log('✅ OpenAI response received');
+      const extractedText = completion.choices[0].message.content;
+      
+      if (!extractedText) {
+        console.log('⚠️ No text extracted from image');
+      } else {
+        console.log('📝 Extracted text length:', extractedText.length);
+      }
+
+      return sendWhatsAppMessage(from, extractedText || 'No text could be extracted from the image.');
+
+    } catch (innerError) {
+      console.error('🔴 Error processing image:', innerError);
       return sendWhatsAppMessage(
         from,
-        'Please send a valid image file (JPEG, PNG, GIF, or WEBP).'
+        'Sorry, there was an error processing your image. Please try again with a different image.'
       );
     }
 
-    const imageBuffer = await imageResponse.arrayBuffer();
-    const imageBase64 = Buffer.from(imageBuffer).toString('base64');
-    console.log('Image size:', imageBuffer.byteLength); // Add logging for image size
-
-    // Process image with OpenAI Vision
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { 
-              type: "text", 
-              text: "Please extract and structure all the text content from this image. Format the response using WhatsApp formatting: use *asterisks* for bold text, _underscores_ for italics, and ~tildes~ for strikethrough. Avoid using markdown headers, bullet points, or other special formatting. Be concise but thorough." 
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: `data:${contentType};base64,${imageBase64}`,
-              },
-            },
-          ],
-        },
-      ],
-      max_tokens: 500,
-    });
-
-    const extractedText = completion.choices[0].message.content;
-
-    // Send the response back via WhatsApp (no need for cleaning since format is correct)
-    return sendWhatsAppMessage(from, extractedText || 'No text could be extracted from the image.');
-
   } catch (error) {
-    console.error('Error processing request:', error);
+    console.error('🔴 Error processing request:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
@@ -220,37 +247,36 @@ export async function POST(request: Request) {
   }
 }
 
-// Update the sendWhatsAppMessage function to handle message arrays
+// Update sendWhatsAppMessage with better logging
 async function sendWhatsAppMessage(to: string, message: string) {
   const client = twilio(
     process.env.TWILIO_ACCOUNT_SID,
     process.env.TWILIO_AUTH_TOKEN
   );
 
-  console.log('Sending message to:', to);
+  console.log('📤 Sending message to:', to);
   
   const messages = splitIntoWhatsAppMessages(message);
-  console.log(`Splitting into ${messages.length} messages`);
+  console.log(`📬 Splitting into ${messages.length} messages`);
 
   try {
-    // Send messages sequentially
     for (const msgContent of messages) {
-      console.log('Sending message part, length:', msgContent.length);
+      console.log('📨 Sending message part, length:', msgContent.length);
       await client.messages.create({
         from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
         to: to,
         body: msgContent,
       });
       
-      // Add a small delay between messages if sending multiple
       if (messages.length > 1) {
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
     }
 
+    console.log('✅ All messages sent successfully');
     return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error sending message:', error);
+    console.error('🔴 Error sending message:', error);
     return NextResponse.json({ error: 'Failed to send message' }, { status: 500 });
   }
 }
