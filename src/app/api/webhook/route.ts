@@ -111,138 +111,168 @@ export async function POST(request: Request) {
   try {
     console.log('🔵 Received webhook request');
 
-    const formData = await request.formData();
-    const from = formData.get('From') as string;
-    const body = formData.get('Body') as string;
-    
-    console.log('📱 Message from:', from);
-    console.log('📝 Message body:', body);
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Processing timeout - request took too long'));
+      }, 8000);
+    });
 
-    // If there's no media, just respond to the text message
-    if (!formData.get('MediaUrl0')) {
-      console.log('❌ No media received');
-      return sendWhatsAppMessage(
-        from,
-        'Hello! Please send an image to digitize its content.'
-      );
-    }
-
-    // Apply rate limiting
-    const { success, reset } = await ratelimit.limit(from);
-    if (!success) {
-      const resetDate = new Date(reset);
-      return sendWhatsAppMessage(
-        from,
-        `You've reached the limit of requests. Please try again after ${resetDate.toLocaleTimeString()}.`
-      );
-    }
-
-    // Get the image content and handle the format
-    const mediaUrl = formData.get('MediaUrl0') as string;
-    console.log('🖼️ Media URL:', mediaUrl);
-
-    try {
-      // Create Twilio client for media handling
-      const client = twilio(
-        process.env.TWILIO_ACCOUNT_SID,
-        process.env.TWILIO_AUTH_TOKEN
-      );
-
-      // Extract the Media SID from the URL
-      const mediaSid = mediaUrl.split('/Media/')[1];
-      console.log('🆔 Media SID:', mediaSid);
-
-      // Get the media resource
-      const media = await client.messages(formData.get('MessageSid') as string)
-        .media(mediaSid)
-        .fetch();
+    const processImagePromise = async () => {
+      const formData = await request.formData();
+      const from = formData.get('From') as string;
+      const body = formData.get('Body') as string;
       
-      // Get the actual content URL
-      const contentUrl = media.uri.replace('.json', '');
-      console.log('🔗 Content URL:', contentUrl);
+      console.log('📱 Message from:', from);
+      console.log('📝 Message body:', body);
 
-      // Fetch the actual image
-      const imageResponse = await fetch(`https://api.twilio.com${contentUrl}`, {
-        headers: {
-          Authorization: `Basic ${Buffer.from(
-            `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
-          ).toString('base64')}`,
-        },
-      });
-
-      const contentType = imageResponse.headers.get('content-type');
-      console.log('📋 Content Type:', contentType);
-
-      if (!contentType || !contentType.startsWith('image/')) {
-        console.log('❌ Invalid content type:', contentType);
+      if (!formData.get('MediaUrl0')) {
+        console.log('❌ No media received');
         return sendWhatsAppMessage(
           from,
-          'Please send a valid image file (JPEG, PNG, GIF, or WEBP).'
+          'Hello! Please send an image to digitize its content.'
         );
       }
 
-      const imageBuffer = await imageResponse.arrayBuffer();
-      console.log('📊 Image size:', {
-        bytes: imageBuffer.byteLength,
-        megabytes: (imageBuffer.byteLength / (1024 * 1024)).toFixed(2) + 'MB'
-      });
-
-      // Add size check
-      if (imageBuffer.byteLength > 20 * 1024 * 1024) { // 20MB limit
-        console.log('❌ Image too large');
+      // Apply rate limiting
+      const { success, reset } = await ratelimit.limit(from);
+      if (!success) {
+        const resetDate = new Date(reset);
         return sendWhatsAppMessage(
           from,
-          'The image is too large. Please send an image smaller than 20MB.'
+          `You've reached the limit of requests. Please try again after ${resetDate.toLocaleTimeString()}.`
         );
       }
 
-      const imageBase64 = Buffer.from(imageBuffer).toString('base64');
+      // Get the image content and handle the format
+      const mediaUrl = formData.get('MediaUrl0') as string;
+      console.log('🖼️ Media URL:', mediaUrl);
 
-      // Process image with OpenAI Vision
-      console.log('🤖 Sending to OpenAI...');
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Please extract and structure all the text content from this image..." },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${contentType};base64,${imageBase64}`,
-                },
-              },
-            ],
+      try {
+        // Create Twilio client for media handling
+        const client = twilio(
+          process.env.TWILIO_ACCOUNT_SID,
+          process.env.TWILIO_AUTH_TOKEN
+        );
+
+        // Extract the Media SID from the URL
+        const mediaSid = mediaUrl.split('/Media/')[1];
+        console.log('🆔 Media SID:', mediaSid);
+
+        // Get the media resource
+        const media = await client.messages(formData.get('MessageSid') as string)
+          .media(mediaSid)
+          .fetch();
+        
+        // Get the actual content URL
+        const contentUrl = media.uri.replace('.json', '');
+        console.log('🔗 Content URL:', contentUrl);
+
+        // Fetch the actual image
+        const imageResponse = await fetch(`https://api.twilio.com${contentUrl}`, {
+          headers: {
+            Authorization: `Basic ${Buffer.from(
+              `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+            ).toString('base64')}`,
           },
-        ],
-        max_tokens: 500,
-      });
+        });
 
-      console.log('✅ OpenAI response received');
-      const extractedText = completion.choices[0].message.content;
-      
-      if (!extractedText) {
-        console.log('⚠️ No text extracted from image');
-      } else {
-        console.log('📝 Extracted text length:', extractedText.length);
+        const contentType = imageResponse.headers.get('content-type');
+        console.log('📋 Content Type:', contentType);
+
+        if (!contentType || !contentType.startsWith('image/')) {
+          console.log('❌ Invalid content type:', contentType);
+          return sendWhatsAppMessage(
+            from,
+            'Please send a valid image file (JPEG, PNG, GIF, or WEBP).'
+          );
+        }
+
+        const imageBuffer = await imageResponse.arrayBuffer();
+        console.log('📊 Image size:', {
+          bytes: imageBuffer.byteLength,
+          megabytes: (imageBuffer.byteLength / (1024 * 1024)).toFixed(2) + 'MB'
+        });
+
+        // Add size check
+        if (imageBuffer.byteLength > 20 * 1024 * 1024) { // 20MB limit
+          console.log('❌ Image too large');
+          return sendWhatsAppMessage(
+            from,
+            'The image is too large. Please send an image smaller than 20MB.'
+          );
+        }
+
+        const imageBase64 = Buffer.from(imageBuffer).toString('base64');
+
+        // Add a timeout specifically for OpenAI request
+        const openAiPromise = openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Please extract and structure all the text content from this image..." },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${contentType};base64,${imageBase64}`,
+                  },
+                },
+              ],
+            },
+          ],
+          max_tokens: 500,
+        });
+
+        console.log('🤖 Sending to OpenAI...');
+        
+        const completion = await Promise.race([
+          openAiPromise,
+          new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('OpenAI API timeout')), 7000);
+          })
+        ]) as OpenAI.Chat.ChatCompletion;
+
+        console.log('✅ OpenAI response received');
+        const extractedText = completion?.choices[0]?.message?.content;
+        
+        if (!extractedText) {
+          console.log('⚠️ No text extracted from image');
+        } else {
+          console.log('📝 Extracted text length:', extractedText.length);
+        }
+
+        return sendWhatsAppMessage(from, extractedText || 'No text could be extracted from the image.');
+
+      } catch (error: any) {
+        console.error('🔴 Error processing image:', error);
+        
+        let errorMessage = 'Sorry, there was an error processing your image. Please try again with a different image.';
+        if (error?.message === 'OpenAI API timeout') {
+          errorMessage = 'Processing took too long for our sandbox. Please try again with a clearer or smaller image.';
+        }
+        
+        return sendWhatsAppMessage(from, errorMessage);
       }
+    };
 
-      return sendWhatsAppMessage(from, extractedText || 'No text could be extracted from the image.');
+    // Race between the main process and the timeout
+    return await Promise.race([processImagePromise(), timeoutPromise]);
 
-    } catch (innerError) {
-      console.error('🔴 Error processing image:', innerError);
-      return sendWhatsAppMessage(
-        from,
-        'Sorry, there was an error processing your image. Please try again with a different image.'
-      );
-    }
-
-  } catch (error) {
+  } catch (error: any) {
     console.error('🔴 Error processing request:', error);
+    
+    let statusCode = 500;
+    let errorMessage = 'Internal server error';
+    
+    if (error?.message === 'Processing timeout - request took too long') {
+      statusCode = 504;
+      errorMessage = 'Processing took too long for our sandbox. Please try again with a clearer or smaller image.';
+    }
+    
     return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
+      { error: errorMessage },
+      { status: statusCode }
     );
   }
 }
