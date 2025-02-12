@@ -107,17 +107,17 @@ function splitIntoWhatsAppMessages(text: string, maxLength: number = 1500): stri
     : messages;
 }
 
-export async function POST(request: Request) {
+export async function POST(request: Request): Promise<Response> {
   try {
     console.log('🔵 Received webhook request');
 
-    const timeoutPromise = new Promise((_, reject) => {
+    const timeoutPromise = new Promise<Response>((_, reject) => {
       setTimeout(() => {
         reject(new Error('Processing timeout - request took too long'));
       }, 8000);
     });
 
-    const processImagePromise = async () => {
+    const processImagePromise = async (): Promise<Response> => {
       const formData = await request.formData();
       const from = formData.get('From') as string;
       const body = formData.get('Body') as string;
@@ -256,7 +256,6 @@ export async function POST(request: Request) {
       }
     };
 
-    // Race between the main process and the timeout
     return await Promise.race([processImagePromise(), timeoutPromise]);
 
   } catch (error: any) {
@@ -278,7 +277,7 @@ export async function POST(request: Request) {
 }
 
 // Update sendWhatsAppMessage with better logging
-async function sendWhatsAppMessage(to: string, message: string) {
+async function sendWhatsAppMessage(to: string, message: string): Promise<Response> {
   const client = twilio(
     process.env.TWILIO_ACCOUNT_SID,
     process.env.TWILIO_AUTH_TOKEN
@@ -311,6 +310,6 @@ async function sendWhatsAppMessage(to: string, message: string) {
   }
 }
 
-export async function GET(request: Request) {
+export async function GET(request: Request): Promise<Response> {
   return new Response('Webhook endpoint is active');
 }
